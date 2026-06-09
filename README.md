@@ -10,6 +10,7 @@ The idea: let the agent work with relaxed permissions without giving it your mac
 - **Your config, not a blank slate.** `~/.claude` and `~/.claude.json` are mounted read-only and selectively copied into the container, so your skills, agents, MCP servers, settings, and auth come along — but nothing inside the container can modify the originals. Heavy host-specific state (session transcripts, file history) is skipped; the container keeps its own history in a persistent volume, so previous sandbox sessions stay resumable.
 - **A real sandbox posture.** The container runs as the unprivileged `node` user with all capabilities dropped (except the four needed to fix volume ownership at startup, after which it de-escalates via `gosu`).
 - **Clean dependency isolation.** `node_modules` lives in a per-project named Docker volume, so the container keeps Linux-native modules instead of fighting your host's over the bind mount.
+- **Headless Chromium baked in.** The agent can take screenshots and run browser automation out of the box — Debian's `chromium` works on amd64 and arm64, and puppeteer is pointed at it (`PUPPETEER_EXECUTABLE_PATH`) so nothing tries to download an x64-only browser at runtime.
 
 ## Requirements
 
@@ -131,12 +132,13 @@ docker rmi svelte-sandbox:latest
 - **macOS needs one login.** Keychain-stored credentials can't be mirrored — see [Logging in](#logging-in-macos-especially). After the first `/login` inside the sandbox you're set.
 - **Host config wins on every start.** Mirrored items (settings, skills, agents, credentials) are re-copied at each launch, so changes made to those *inside* the container are overwritten by the host versions next run. Container-only state — session history, transcripts, an in-container login — lives in the persistent volume and survives.
 - **The dev server needs `--host`.** The port is published, but Vite binds container-localhost by default. The agent is instructed (via the container-side `CLAUDE.md`) to start it correctly; only manual runs need you to remember `--host`.
+- **Claude asks to approve the Svelte MCP server on every run.** The approval is stored in `~/.claude.json`, which is ephemeral inside the container, so it can't stick. It's one keypress, and it's left in place deliberately — an explicit consent step before enabling a project-scoped MCP server.
 - **Linux UID mismatch.** Files the container writes to the project bind mount are owned by uid 1000 (`node`). On Docker Desktop for macOS this is transparent; on Linux it only lines up if your user is uid 1000.
 
 ## Files
 
 - [`svelte-sandbox`](./svelte-sandbox) — host-side wrapper: builds the image, assembles mounts, runs the container.
-- [`Dockerfile`](./Dockerfile) — `node:22-bookworm-slim` + git + Claude Code + `sv` + pnpm (via corepack).
+- [`Dockerfile`](./Dockerfile) — `node:22-bookworm-slim` + git + Chromium + Claude Code + `sv` + pnpm (via corepack).
 - [`entrypoint.sh`](./entrypoint.sh) — runs in-container: drops privileges, mirrors config, scaffolds/detects the project, ensures the MCP, launches `claude`.
 
 ## License

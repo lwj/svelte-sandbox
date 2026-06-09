@@ -37,29 +37,55 @@ if [ -f /host-claude.json ]; then
   cp -a /host-claude.json "$HOME/.claude.json" 2>/dev/null || true
 fi
 
-# --- Dev-server guidance for the agent ---------------------------------------
-# The user lands straight in claude, not a shell, so the instruction to bind
-# the dev server on all interfaces goes to the agent via the user-level
-# CLAUDE.md (container-side only — the host's copy is never touched). The
-# mirror above re-copies any host CLAUDE.md each start, so re-append unless
-# the marker is already present.
-if [ -n "${DEV_PORT:-}" ] && ! grep -qs 'svelte-sandbox:dev-server' "$HOME/.claude/CLAUDE.md"; then
-  mkdir -p "$HOME/.claude"
-  cat >> "$HOME/.claude/CLAUDE.md" <<EOF
+# --- Sandbox guidance for the agent -------------------------------------------
+# The user lands straight in claude, not a shell, so environment notes (dev
+# server binding, headless Chromium) go to the agent via the user-level
+# CLAUDE.md (container-side only — the host's copy is never touched). This is
+# a managed block: any previous version is stripped and the current one
+# appended on every start, so note updates and --port changes always take
+# effect even when the file persists in the volume between runs.
+mkdir -p "$HOME/.claude"
+NOTES="$HOME/.claude/CLAUDE.md"
+if [ -f "$NOTES" ]; then
+  awk '
+    /<!-- svelte-sandbox:begin -->/ { skip = 1; next }
+    /<!-- svelte-sandbox:end -->/   { skip = 0; next }
+    /<!-- svelte-sandbox:(dev-server|agent-notes) -->/ { skip = 1 }  # legacy, ran to EOF
+    !skip
+  ' "$NOTES" > "$NOTES.tmp" && mv "$NOTES.tmp" "$NOTES"
+fi
+{
+  cat <<EOF
 
-<!-- svelte-sandbox:dev-server -->
+<!-- svelte-sandbox:begin -->
 # Sandbox environment
 
-You are running inside the svelte-sandbox Docker container. Only port $DEV_PORT
-is published to the user's host machine (as 127.0.0.1:$DEV_PORT). When starting
-the dev server, bind all interfaces and use that port:
+You are running inside the svelte-sandbox Docker container.
+EOF
+  if [ -n "${DEV_PORT:-}" ]; then
+    cat <<EOF
+
+Only port $DEV_PORT is published to the user's host machine (as
+127.0.0.1:$DEV_PORT). When starting the dev server, bind all interfaces and
+use that port:
 
     npm run dev -- --host --port $DEV_PORT
 
 Then tell the user to open http://localhost:$DEV_PORT in their browser. Other
 ports are not reachable from the host.
 EOF
-fi
+  fi
+  cat <<EOF
+
+For screenshots and browser automation, headless Chromium is preinstalled at
+/usr/bin/chromium (PUPPETEER_EXECUTABLE_PATH already points to it — never
+download another browser). The container can't use Chrome's own sandbox, so
+always pass --no-sandbox, e.g.:
+
+    chromium --headless --no-sandbox --screenshot=/tmp/shot.png http://localhost:${DEV_PORT:-5173}
+<!-- svelte-sandbox:end -->
+EOF
+} >> "$NOTES"
 
 # --- Svelte MCP helpers ------------------------------------------------------
 has_svelte_mcp() {
