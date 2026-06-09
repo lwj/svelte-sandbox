@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="svelte-sandbox:latest"
+
+# Resolve symlinks so HERE is the repo (with the Dockerfile), even when this
+# script is invoked via a symlink on PATH.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in
+    /*) SELF="$target" ;;
+    *)  SELF="$(dirname "$SELF")/$target" ;;
+  esac
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+
+MCP_MODE="local"
+BUILD=0
+CLEAN=0
+PORT="5173"
+PROJECT_PATH="$(pwd)/svelte-app"
+CLAUDE_ARGS=()
+
+# Per-project volume name for node_modules, keyed to the absolute project path;
+# cksum is portable across macOS and Linux.
+nm_volume() { printf 'svelte-sandbox-nm-%s' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
+
+usage() {
+  cat <<EOF
+svelte-sandbox — sandboxed SvelteKit + Claude Code, with your host Claude config mirrored in
+
+Usage: svelte-sandbox [options] [project-path] [-- claude-args...]
+
+Options:
+  --remote      Use the hosted Svelte MCP (mcp.svelte.dev) instead of the local one.
+  --build       (Re)build the Docker image before running.
+  --port N      Publish container port N on 127.0.0.1:N for the dev server
+                (default: 5173). Use '--port none' to publish nothing.
+  --clean       Remove the node_modules volume for [project-path] and exit.
+  -h, --help    Show this help.
+
+Any unrecognised flags (and anything after --) are forwarded to 'claude' inside
+the container, e.g.:
+
+  svelte-sandbox --dangerously-skip-permissions
+  svelte-sandbox ./my-app -- --model opus
+
+[project-path] (default: ./svelte-app) is bind-mounted as the project root.
+Your ~/.claude and ~/.claude.json (skills, statusline, MCPs, auth) are mirrored
+in read-only.
+EOF
+}
+
+PASSTHROUGH=0
+while [ $# -gt 0 ]; do
+  if [ "$PASSTHROUGH" -eq 1 ]; then CLAUDE_ARGS+=("$1"); shift; continue; fi
+  case "$1" in
+    --)        PASSTHROUGH=1; shift ;;
+    --remote)  MCP_MODE="remote"; shift ;;
+    --build)   BUILD=1; shift ;;
+    --clean)   CLEAN=1; shift ;;
+    --port)
+      [ $# -ge 2 ] || { echo "!! --port needs a value (a port number, or 'none')" >&2; exit 1; }
+      PORT="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*)        CLAUDE_ARGS+=("$1"); shift ;;   # unknown flag -> forward to claude
+    *)         PROJECT_PATH="$1"; shift ;;
+  esac
+done
+
+if [ "$CLEAN" -eq 1 ]; then
+  if [ ! -d "$PROJECT_PATH" ]; then
+    echo "!! No such project directory: $PROJECT_PATH" >&2
+    exit 1
+  fi
+  PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"
+  NM_VOL="$(nm_volume "$PROJECT_PATH")"
+  echo "==> Removing node_modules volume $NM_VOL for $PROJECT_PATH"
+  docker volume rm "$NM_VOL" || true
+  echo "    Claude state is kept; reset it with: docker volume rm svelte-sandbox-claude"
+  exit 0
+fi
+
+if [ "$BUILD" -eq 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "==> Building $IMAGE"
+  docker build --build-arg CACHEBUST="$(date +%s)" -t "$IMAGE" "$HERE"
+fi
+
+mkdir -p "$PROJECT_PATH"
+PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"   # absolute; mirrored inside the container
+
+# Per-project volume for node_modules, so the container keeps its own
+# (Linux-native) modules instead of fighting the host's over the bind mount.
+NM_VOL="$(nm_volume "$PROJECT_PATH")"
+
+# Publish the dev-server port on loopback only (not the LAN). The dev server
+# inside the container still has to bind 0.0.0.0, e.g. 'npm run dev -- --host'.
+PORT_ARGS=()
+DEV_PORT=""
+if [ "$PORT" != "none" ]; then
+  case "$PORT" in
+    ''|*[!0-9]*) echo "!! --port expects a port number or 'none', got: $PORT" >&2; exit 1 ;;
+  esac
+  PORT_ARGS+=(-p "127.0.0.1:${PORT}:${PORT}")
+  DEV_PORT="$PORT"
+fi
+
+# Mirror host Claude Code config in read-only, when present.
+MOUNTS=()
+if [ -d "$HOME/.claude" ]; then
+  MOUNTS+=(-v "$HOME/.claude":/host-claude:ro)
+fi
+if [ -f "$HOME/.claude.json" ]; then
+  MOUNTS+=(-v "$HOME/.claude.json":/host-claude.json:ro)
+fi
+
+exec docker run -it --rm \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID \
+  -e MCP_MODE="$MCP_MODE" \
+  -e PROJECT_DIR="$PROJECT_PATH" \
+  -e DEV_PORT="$DEV_PORT" \
+  ${PORT_ARGS[@]+"${PORT_ARGS[@]}"} \
+  ${MOUNTS[@]+"${MOUNTS[@]}"} \
+  -v svelte-sandbox-claude:/home/node/.claude \
+  -v "$PROJECT_PATH":"$PROJECT_PATH" \
+  -v "$NM_VOL":"$PROJECT_PATH/node_modules" \
+  "$IMAGE" \
+  claude ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}
